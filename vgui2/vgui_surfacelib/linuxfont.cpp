@@ -22,6 +22,8 @@
 #include <utlbuffer.h>
 #if HAVE_FC
 #include <fontconfig/fontconfig.h>
+#include <unistd.h>	// access()
+#include <stdlib.h>	// getenv(), setenv()
 #endif
 #include <freetype/ftbitmap.h>
 #include "materialsystem/imaterialsystem.h"
@@ -33,6 +35,20 @@
 #include "tier0/memdbgon.h"
 
 #define FT_LOAD_FLAGS	0 //$ (FT_LOAD_TARGET_LIGHT)
+
+#if HAVE_FC
+// Some Linux SDK builds ship a bundled libfontconfig.so with a broken
+// compiled-in default config path. Point FONTCONFIG_FILE at the system
+// config before any fontconfig call (including the implicit auto-init
+// inside FcConfigSubstitute/FcFontMatch) so the bundled lib loads the
+// host's fonts.conf instead of the missing built-in path. This static
+// initializer runs at .so load time, before any font code executes.
+static int s_nFontConfigFileInit = []() {
+	if ( !getenv( "FONTCONFIG_FILE" ) && access( "/etc/fonts/fonts.conf", R_OK ) == 0 )
+		setenv( "FONTCONFIG_FILE", "/etc/fonts/fonts.conf", 0 );
+	return 0;
+}();
+#endif
 
 namespace {
 
@@ -138,29 +154,38 @@ void CLinuxFont::CreateFontList()
         Q_memcpy( entry.m_pchFriendlyName, name, Q_strlen(name) +1);
         m_FriendlyNameCache.Insert( entry );
 
-		// substitute Vera Sans for Tahoma on X
-		if ( !V_stricmp( name, "Bitstream Vera Sans" ) )
+		// Map modern Linux fonts to the Windows font names the VGUI schemes
+		// reference. Bitstream Vera Sans was the original substitution target
+		// for Tahoma, but modern distros ship DejaVu Sans (Vera's successor)
+		// and/or Noto Sans instead. Map all of them so the friendly-name cache
+		// resolves Tahoma/Verdana/Trebuchet MS/Arial/Lucida Console regardless
+		// of which sans-serif family the distro ships.
+		struct FcFontAlias_t { const char *fc; const char *win; };
+		static const FcFontAlias_t alias[] = {
+			{ "Bitstream Vera Sans", "Tahoma" },
+			{ "DejaVu Sans",         "Tahoma" },
+			{ "Noto Sans",           "Tahoma" },
+			{ "Liberation Sans",     "Arial" },
+			{ "Bitstream Vera Sans", "Verdana" },
+			{ "DejaVu Sans",         "Verdana" },
+			{ "Noto Sans",           "Verdana" },
+			{ "Bitstream Vera Sans", "Trebuchet MS" },
+			{ "DejaVu Sans",         "Trebuchet MS" },
+			{ "Noto Sans",           "Trebuchet MS" },
+			{ "Bitstream Vera Sans", "Lucidia Console" },
+			{ "DejaVu Sans",         "Lucidia Console" },
+			{ "Liberation Mono",     "Lucidia Console" },
+		};
+		for ( int iAlias = 0; iAlias < ARRAYSIZE(alias); ++iAlias )
 		{
-			name = "Tahoma";
-			entry.m_pchFile = (char *)malloc( Q_strlen(file) + 1 );
-			entry.m_pchFriendlyName = (char *)malloc( Q_strlen(name) +1);
-			Q_memcpy( entry.m_pchFile, file, Q_strlen(file) + 1 );
-			Q_memcpy( entry.m_pchFriendlyName, name, Q_strlen(name) +1);
-			m_FriendlyNameCache.Insert( entry );
-
-			name = "Verdana";
-			entry.m_pchFile = (char *)malloc( Q_strlen(file) + 1 );
-			entry.m_pchFriendlyName = (char *)malloc( Q_strlen(name) +1);
-			Q_memcpy( entry.m_pchFile, file, Q_strlen(file) + 1 );
-			Q_memcpy( entry.m_pchFriendlyName, name, Q_strlen(name) +1);
-			m_FriendlyNameCache.Insert( entry );
-
-			name = "Lucidia Console";
-			entry.m_pchFile = (char *)malloc( Q_strlen(file) + 1 );
-			entry.m_pchFriendlyName = (char *)malloc( Q_strlen(name) +1);
-			Q_memcpy( entry.m_pchFile, file, Q_strlen(file) + 1 );
-			Q_memcpy( entry.m_pchFriendlyName, name, Q_strlen(name) +1);
-			m_FriendlyNameCache.Insert( entry );
+			if ( !V_stricmp( name, alias[iAlias].fc ) )
+			{
+				entry.m_pchFile = (char *)malloc( Q_strlen(file) + 1 );
+				entry.m_pchFriendlyName = (char *)malloc( Q_strlen(alias[iAlias].win) + 1 );
+				Q_memcpy( entry.m_pchFile, file, Q_strlen(file) + 1 );
+				Q_memcpy( entry.m_pchFriendlyName, alias[iAlias].win, Q_strlen(alias[iAlias].win) + 1 );
+				m_FriendlyNameCache.Insert( entry );
+			}
 		}
     }
 
@@ -503,8 +528,12 @@ char *CLinuxFont::GetFontFileName( const char *windowsFontName, int flags )
 	bool bBold = false;
 	const char *pchFontName = windowsFontName;
 
-	if ( !Q_stricmp( pchFontName, "Tahoma" ) )
-		pchFontName = "Bitstream Vera Sans";
+	if ( !Q_stricmp( pchFontName, "Tahoma" ) || !Q_stricmp( pchFontName, "Verdana" ) || !Q_stricmp( pchFontName, "Trebuchet MS" ) )
+		pchFontName = "DejaVu Sans";
+	else if ( !Q_stricmp( pchFontName, "Arial" ) )
+		pchFontName = "Liberation Sans";
+	else if ( !Q_stricmp( pchFontName, "Lucidia Console" ) || !Q_stricmp( pchFontName, "Lucida Console" ) )
+		pchFontName = "Liberation Mono";
 	else if ( !Q_stricmp( pchFontName, "Arial Black" ) || Q_stristr( pchFontName, "bold" ) )
 		bBold = true;
 
