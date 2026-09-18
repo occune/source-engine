@@ -271,6 +271,11 @@ static bool s_bRunningWithDebugModules = false;
 
 #ifdef ANDROID
 #define DEFAULT_LIB_PATH ""
+#elif defined(__x86_64__)
+// On 64-bit Linux, Valve's SDK layout puts .so files in bin/linux64/ rather
+// than bin/. Match that so LoadModule("vstdlib.so") etc. find the 64-bit
+// copies instead of falling back to the 32-bit ones in bin/.
+#define DEFAULT_LIB_PATH "bin/linux64/"
 #else
 #define DEFAULT_LIB_PATH "bin/"
 #endif
@@ -283,8 +288,29 @@ bool foundLibraryWithPrefix( char *pModuleAbsolutePath, size_t AbsolutePathSize,
 	bool bFound = false;
 
 	struct stat statBuf;
-	Q_snprintf(pModuleAbsolutePath, AbsolutePathSize, "%s/" DEFAULT_LIB_PATH "lib%s", pPath, str);
-	bFound |= stat(pModuleAbsolutePath, &statBuf) == 0;
+
+	// If pModuleName already contains a path separator (e.g. "hl2/bin/linux64/client"
+	// passed in by the filesystem's LoadModule), don't prepend DEFAULT_LIB_PATH —
+	// that would double-prefix the path. Try pPath/pModuleName directly first.
+	bool bHasPath = strchr( pModuleName, '/' ) != NULL || strchr( pModuleName, '\\' ) != NULL;
+
+	if ( bHasPath )
+	{
+		Q_snprintf(pModuleAbsolutePath, AbsolutePathSize, "%s/lib%s", pPath, str);
+		bFound |= stat(pModuleAbsolutePath, &statBuf) == 0;
+
+		if( !bFound )
+		{
+			Q_snprintf(pModuleAbsolutePath, AbsolutePathSize, "%s/%s", pPath, str);
+			bFound |= stat(pModuleAbsolutePath, &statBuf) == 0;
+		}
+	}
+
+	if( !bFound )
+	{
+		Q_snprintf(pModuleAbsolutePath, AbsolutePathSize, "%s/" DEFAULT_LIB_PATH "lib%s", pPath, str);
+		bFound |= stat(pModuleAbsolutePath, &statBuf) == 0;
+	}
 
 	if( !bFound )
 	{

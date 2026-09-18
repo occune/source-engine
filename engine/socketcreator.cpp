@@ -80,12 +80,25 @@ bool CSocketCreator::CreateListenSocket( const netadr_t &netAdr )
 	CloseListenSocket();
 
 	m_ListenAddress = netAdr;
-	m_hListenSocket = socket (PF_INET, SOCK_STREAM, IPPROTO_TCP);
+
+	// Create the socket in the family matching the requested address. An NA_IP
+	// address gets AF_INET; NA_IP6 gets AF_INET6. For IPv4 we keep the legacy
+	// PF_INET call so older toolchains behave identically.
+	int nFamily = netAdr.IsIPv6() ? AF_INET6 : AF_INET;
+	m_hListenSocket = socket ( nFamily, SOCK_STREAM, IPPROTO_TCP );
 	if ( m_hListenSocket == -1 )
 	{
 		Warning( "Socket unable to create socket (%s)\n", NET_ErrorString( WSAGetLastError() ) );
 		return false;
 	}
+
+#if defined(POSIX)
+	if ( nFamily == AF_INET6 )
+	{
+		int v6only = 0;
+		setsockopt( m_hListenSocket, IPPROTO_IPV6, IPV6_V6ONLY, (char *)&v6only, sizeof(v6only) );
+	}
+#endif
 
 	if ( !ConfigureSocket( m_hListenSocket ) )
 	{
@@ -93,9 +106,12 @@ bool CSocketCreator::CreateListenSocket( const netadr_t &netAdr )
 		return false;
 	}
 
-	struct sockaddr_in s;
+	// sockaddr_storage is large enough for both sockaddr_in and sockaddr_in6.
+	struct sockaddr_storage s;
+	Q_memset( &s, 0, sizeof(s) );
 	m_ListenAddress.ToSockadr( (struct sockaddr *)&s );
-	int ret = bind( m_hListenSocket, (struct sockaddr *)&s, sizeof(struct sockaddr_in) );
+	socklen_t addrlen = ( nFamily == AF_INET6 ) ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
+	int ret = bind( m_hListenSocket, (struct sockaddr *)&s, addrlen );
 	if ( ret == -1 )
 	{
 		Warning( "Socket bind failed (%s)\n", NET_ErrorString( WSAGetLastError() ) );
@@ -144,10 +160,11 @@ bool CSocketCreator::ConfigureSocket( int sock )
 void CSocketCreator::ProcessAccept()
 {
 	int newSocket;
-	sockaddr sa;
+	// Must be sockaddr_storage to fit IPv6 peer addresses (28 bytes).
+	sockaddr_storage sa;
 	int nLengthAddr = sizeof(sa);
 
-	newSocket = accept( m_hListenSocket, &sa, (socklen_t *)&nLengthAddr );
+	newSocket = accept( m_hListenSocket, (sockaddr *)&sa, (socklen_t *)&nLengthAddr );
 	if ( newSocket == -1 )
 	{
 		if ( !SocketWouldBlock()
@@ -168,7 +185,7 @@ void CSocketCreator::ProcessAccept()
 	}
 
 	netadr_t adr;
-	adr.SetFromSockadr( &sa );
+	adr.SetFromSockadr( (sockaddr *)&sa );
 	if ( m_pListener && !m_pListener->ShouldAcceptSocket( newSocket, adr ) )
 	{
 		closesocket( newSocket );
@@ -201,12 +218,21 @@ int CSocketCreator::ConnectSocket( const netadr_t &netAdr, bool bSingleSocket )
 		CloseAllAcceptedSockets();
 	}
 
-	SocketHandle_t hSocket = socket( PF_INET, SOCK_STREAM, IPPROTO_TCP );
+	int nFamily = netAdr.IsIPv6() ? AF_INET6 : AF_INET;
+	SocketHandle_t hSocket = socket( nFamily, SOCK_STREAM, IPPROTO_TCP );
 	if ( hSocket == -1 )
 	{
 		Warning( "Unable to create socket (%s)\n", NET_ErrorString( WSAGetLastError() ) );
 		return -1;
 	}
+
+#if defined(POSIX)
+	if ( nFamily == AF_INET6 )
+	{
+		int v6only = 0;
+		setsockopt( hSocket, IPPROTO_IPV6, IPV6_V6ONLY, (char *)&v6only, sizeof(v6only) );
+	}
+#endif
 
 	int opt = 1, ret;
 	ret = ioctlsocket( hSocket, FIONBIO, (unsigned long*)&opt ); // non-blocking
@@ -221,10 +247,12 @@ int CSocketCreator::ConnectSocket( const netadr_t &netAdr, bool bSingleSocket )
 	int nodelay = 1;
 	setsockopt( hSocket, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay) ); 
 
-	struct sockaddr_in s;
+	struct sockaddr_storage s;
+	Q_memset( &s, 0, sizeof(s) );
 	netAdr.ToSockadr( (struct sockaddr *)&s );
+	socklen_t addrlen = ( nFamily == AF_INET6 ) ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
 
-	ret = connect( hSocket, (struct sockaddr *)&s, sizeof(s));
+	ret = connect( hSocket, (struct sockaddr *)&s, addrlen);
 	if ( ret == -1 )
 	{
 		if ( !SocketWouldBlock() )

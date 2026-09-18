@@ -812,7 +812,7 @@ void CVideoMode_Common::SetupStartupGraphic()
         m_pBackgroundTexture = LoadVTF( buf, ( aspectRatio >= 1.6f ) ? "materials/console/background01_widescreen.vtf" : "materials/console/background01.vtf" );
         if ( !m_pBackgroundTexture )
         {
-            Error( "Can't find background image '%s'\n", material );
+            Warning( "Can't find background image '%s' (non-fatal, continuing without it)\n", material );
             return;
         }
     }
@@ -825,7 +825,7 @@ void CVideoMode_Common::SetupStartupGraphic()
     m_pLoadingTexture = LoadVTF( buf, loading );
     if ( !m_pLoadingTexture )
     {
-        Error( "Can't find background image '%s'\n", loading );
+        Warning( "Can't find background image '%s' (non-fatal, continuing without it)\n", loading );
         return;
     }
 }

@@ -24,14 +24,19 @@ typedef enum
 	NA_LOOPBACK,
 	NA_BROADCAST,
 	NA_IP,
+	NA_IP6,		// IPv6 address (stored in ip6[]; ip[] is unused). IPv4-mapped
+				// addresses are normalized to NA_IP, so NA_IP6 always means a
+				// true IPv6 peer.
 } netadrtype_t;
 
 typedef struct netadr_s
 {
 public:
-	netadr_s() { SetIP( 0 ); SetPort( 0 ); SetType( NA_IP ); }
-	netadr_s( uint unIP, uint16 usPort ) { SetIP( unIP ); SetPort( usPort ); SetType( NA_IP ); }
-	netadr_s( const char *pch ) { SetFromString( pch ); }
+	// Note: ip6 is zeroed here without Q_memset, because netadr.h is included
+	// before strtools.h (which defines Q_memset) in some translation units.
+	netadr_s() { for ( int i = 0; i < 16; i++ ) ip6[i] = 0; SetIP( 0 ); SetPort( 0 ); SetType( NA_IP ); }
+	netadr_s( uint unIP, uint16 usPort ) { for ( int i = 0; i < 16; i++ ) ip6[i] = 0; SetIP( unIP ); SetPort( usPort ); SetType( NA_IP ); }
+	netadr_s( const char *pch ) { for ( int i = 0; i < 16; i++ ) ip6[i] = 0; SetIP( 0 ); SetPort( 0 ); SetType( NA_IP ); SetFromString( pch ); }
 	void	Clear();	// invalids Address
 
 	void	SetType( netadrtype_t type );
@@ -40,6 +45,7 @@ public:
 	void	SetIP(uint8 b1, uint8 b2, uint8 b3, uint8 b4);
 	void	SetIP(uint unIP);									// Sets IP.  unIP is in host order (little-endian)
 	void    SetIPAndPort( uint unIP, unsigned short usPort ) { SetIP( unIP ); SetPort( usPort ); }
+	void	SetIP6( const uint8 b[16] );						// Sets the IPv6 address (host byte order, network-format bytes). Type becomes NA_IP6.
 	bool	SetFromString(const char *pch, bool bUseDNS = false ); // if bUseDNS is true then do a DNS lookup if needed
 	
 	bool	CompareAdr (const netadr_s &a, bool onlyBase = false) const;
@@ -48,6 +54,7 @@ public:
 
 	netadrtype_t	GetType() const;
 	unsigned short	GetPort() const;
+	bool			IsIPv6() const;		// true if this is an NA_IP6 address
 
 	// DON'T CALL THIS
 	const char*		ToString( bool onlyBase = false ) const; // returns xxx.xxx.xxx.xxx:ppppp
@@ -87,7 +94,8 @@ public:
 public:	// members are public to avoid to much changes
 
 	netadrtype_t	type;
-	unsigned char	ip[4];
+	unsigned char	ip[4];		// IPv4 address (NA_IP). Unused when type == NA_IP6.
+	unsigned char	ip6[16];	// IPv6 address (NA_IP6). Unused when type == NA_IP.
 	unsigned short	port;
 } netadr_t;
 
@@ -130,7 +138,7 @@ public:
 
 private:
 
-	char m_rgchString[32];
+	char m_rgchString[64];	// large enough for "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535"
 };
 
 #endif // NETADR_H
