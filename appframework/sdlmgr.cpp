@@ -788,6 +788,33 @@ bool CSDLMgr::CreateGameWindow( const char *pTitle, bool bWindowed, int width, i
 	if ( CreateHiddenGameWindow( pTitle, width, height ) )
 	{
 		SDL_ShowWindow( m_Window );
+
+		// Re-apply -x/-y/-display after showing: the window manager may
+		// have repositioned the window onto the primary monitor on show.
+		{
+			const char *pDisplay = NULL, *pX = NULL, *pY = NULL;
+			int setX = -1, setY = -1;
+			if ( CommandLine()->CheckParm( "-display", &pDisplay ) && pDisplay )
+			{
+				int iDisplay = atoi( pDisplay );
+				if ( iDisplay >= 0 && iDisplay < SDL_GetNumVideoDisplays() )
+				{
+					SDL_Rect r;
+					if ( SDL_GetDisplayBounds( iDisplay, &r ) == 0 )
+					{
+						setX = r.x + ( r.w - width ) / 2;
+						setY = r.y + ( r.h - height ) / 2;
+					}
+				}
+			}
+			if ( CommandLine()->CheckParm( "-x", &pX ) && pX )
+				setX = atoi( pX );
+			if ( CommandLine()->CheckParm( "-y", &pY ) && pY )
+				setY = atoi( pY );
+			if ( setX >= 0 && setY >= 0 )
+				SDL_SetWindowPosition( m_Window, setX, setY );
+		}
+
 		return true;
 	}
 	else
@@ -816,6 +843,24 @@ bool CSDLMgr::CreateHiddenGameWindow( const char *pTitle, int width, int height 
 
 	int x = SDL_WINDOWPOS_CENTERED;
 	int y = SDL_WINDOWPOS_CENTERED;
+
+	// Allow -display <N> to center on a specific SDL display index (0-based).
+	// Allow -x <N> and -y <N> to explicitly set window position (overrides -display).
+	const char *pDisplay = NULL, *pX = NULL, *pY = NULL;
+	if ( CommandLine()->CheckParm( "-display", &pDisplay ) && pDisplay )
+	{
+		int iDisplay = atoi( pDisplay );
+		if ( iDisplay >= 0 && iDisplay < SDL_GetNumVideoDisplays() )
+		{
+			x = SDL_WINDOWPOS_CENTERED_DISPLAY( iDisplay );
+			y = SDL_WINDOWPOS_CENTERED_DISPLAY( iDisplay );
+		}
+	}
+	if ( CommandLine()->CheckParm( "-x", &pX ) && pX )
+		x = atoi( pX );
+	if ( CommandLine()->CheckParm( "-y", &pY ) && pY )
+		y = atoi( pY );
+
 	int flags = SDL_WINDOW_HIDDEN;
 #if defined( DX_TO_GL_ABSTRACTION )
 	flags |= SDL_WINDOW_OPENGL;
