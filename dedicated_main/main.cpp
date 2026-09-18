@@ -188,6 +188,13 @@ static void WaitForDebuggerConnect( int argc, char *argv[], int time )
 
 int main( int argc, char *argv[] )
 {
+	// On 64-bit Linux the SDK layout puts .so files in bin/linux64/.
+	// Prefer that subdirectory, with bin/ as a fallback for flat layouts.
+	const char *pBinSub = "";
+#if defined( PLATFORM_64BITS ) && defined( POSIX )
+	pBinSub = "linux64/";
+#endif
+
 	// Must add 'bin' to the path....
 	char* pPath = getenv("LD_LIBRARY_PATH");
 	char szBuffer[4096];
@@ -197,7 +204,7 @@ int main( int argc, char *argv[] )
 		printf( "getcwd failed (%s)", strerror(errno));
 	}
 
-	snprintf( szBuffer, sizeof( szBuffer ) - 1, "LD_LIBRARY_PATH=%s/bin:%s", cwd, pPath );
+	snprintf( szBuffer, sizeof( szBuffer ) - 1, "LD_LIBRARY_PATH=%s/bin/%s:%s/bin:%s", cwd, pBinSub, cwd, pPath );
 	int ret = putenv( szBuffer );
 	if ( ret )	
 	{
@@ -206,9 +213,13 @@ int main( int argc, char *argv[] )
 	void *tier0 = dlopen( "libtier0" DLL_EXT_STRING, RTLD_NOW );
 	void *vstdlib = dlopen( "libvstdlib" DLL_EXT_STRING, RTLD_NOW );
 
-	const char *pBinaryName = "bin/dedicated" DLL_EXT_STRING;
+	// Try bin/linux64/ first (64-bit SDK layout), then bin/ (flat layout).
+	char pBinaryName[ MAX_PATH ];
+	snprintf( pBinaryName, sizeof(pBinaryName), "bin/%sdedicated" DLL_EXT_STRING, pBinSub );
 
 	void *dedicated = dlopen( pBinaryName, RTLD_NOW );
+	if ( !dedicated )
+		dedicated = dlopen( "bin/linux64/libdedicated" DLL_EXT_STRING, RTLD_NOW );
 	if ( !dedicated )
 		dedicated = dlopen( "bin/libdedicated" DLL_EXT_STRING, RTLD_NOW );
 
