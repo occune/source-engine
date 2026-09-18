@@ -293,6 +293,58 @@ const char *NET_ErrorString (int code)
 //-----------------------------------------------------------------------------
 bool NET_StringToSockaddr( const char *s, struct sockaddr *sadr )
 {
+#if defined(POSIX)
+	// Dual-stack resolver. The caller's buffer MUST be at least
+	// sizeof(sockaddr_storage) so a v6 result fits.
+	char copy[128];
+	Q_strncpy( copy, s, sizeof(copy) );
+	copy[ sizeof(copy)-1 ] = 0;
+
+	char *host = copy;
+	char *port = NULL;
+
+	// Bracketed IPv6 literal, optional :port:  [::1]  or  [::1]:27015
+	if ( host[0] == '[' )
+	{
+		char *close = strchr( host, ']' );
+		if ( !close )
+			return false;
+		*close = 0;
+		host = copy + 1;
+		if ( close[1] == ':' )
+			port = close + 2;
+		else if ( close[1] != 0 )
+			return false;
+	}
+	else
+	{
+		// For "host:port" or "1.2.3.4:port" (exactly one colon) strip the port.
+		// A bare IPv6 literal ("::1", "fe80::1") has multiple colons and is left
+		// intact for getaddrinfo to parse; bracket it if you need a port.
+		char *c = strchr( host, ':' );
+		if ( c && !strchr( c + 1, ':' ) )
+		{
+			*c = 0;
+			port = c + 1;
+		}
+	}
+
+	struct addrinfo hints;
+	Q_memset( &hints, 0, sizeof(hints) );
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_DGRAM;
+	hints.ai_flags = AI_ADDRCONFIG;
+	if ( net_nodns )
+		hints.ai_flags |= AI_NUMERICHOST;	// numeric only when DNS is disabled
+
+	struct addrinfo *res = NULL;
+	if ( getaddrinfo( host, port, &hints, &res ) != 0 || !res )
+		return false;
+
+	Q_memcpy( sadr, res->ai_addr, res->ai_addrlen );
+	freeaddrinfo( res );
+	return true;
+#else
 	char	*colon;
 	char	copy[128];
 	
@@ -327,6 +379,7 @@ bool NET_StringToSockaddr( const char *s, struct sockaddr *sadr )
 	}
 	
 	return true;
+#endif
 }
 
 void NET_ClearLastError( void )
@@ -394,7 +447,8 @@ idnewt:28000
 */
 bool NET_StringToAdr ( const char *s, netadr_t *a)
 {
-	struct sockaddr saddr;
+	// Must hold an IPv6 sockaddr (28 bytes) -> use sockaddr_storage.
+	struct sockaddr_storage saddr;
 
 	char address[128];
 	
@@ -408,10 +462,10 @@ bool NET_StringToAdr ( const char *s, netadr_t *a)
 	}
 
 	
-	if ( !NET_StringToSockaddr (address, &saddr) )
+	if ( !NET_StringToSockaddr (address, (struct sockaddr *)&saddr) )
 		return false;
 		
-	a->SetFromSockadr( &saddr );
+	a->SetFromSockadr( (struct sockaddr *)&saddr );
 
 	return true;
 }
@@ -472,10 +526,27 @@ NET_IPSocket
 */
 int NET_OpenSocket ( const char *net_interface, int& port, int protocol )
 {
+#if defined(POSIX)
+	struct sockaddr_in6	address;
+#else
 	struct sockaddr_in	address;
+#endif
 	unsigned int		opt;
 	int					newsocket = -1;
 
+#if defined(POSIX)
+	// Dual-stack: open an AF_INET6 socket and clear IPV6_V6ONLY so it accepts
+	// both IPv6 and IPv4 (as v4-mapped) peers on a single FD. This lets one
+	// bound port serve both families.
+	if ( protocol == IPPROTO_TCP )
+	{
+		VCR_NONPLAYBACKFN( socket (AF_INET6, SOCK_STREAM, IPPROTO_TCP), newsocket, "socket()" );
+	}
+	else // as UDP or VDP
+	{
+		VCR_NONPLAYBACKFN( socket (AF_INET6, SOCK_DGRAM, protocol), newsocket, "socket()" );
+	}
+#else
 	if ( protocol == IPPROTO_TCP )
 	{
 		VCR_NONPLAYBACKFN( socket (PF_INET, SOCK_STREAM, IPPROTO_TCP), newsocket, "socket()" );
@@ -484,6 +555,7 @@ int NET_OpenSocket ( const char *net_interface, int& port, int protocol )
 	{
 		VCR_NONPLAYBACKFN( socket (PF_INET, SOCK_DGRAM, protocol), newsocket, "socket()" );
 	}
+#endif
 
 	if ( newsocket == -1 )
 	{
@@ -493,6 +565,18 @@ int NET_OpenSocket ( const char *net_interface, int& port, int protocol )
 
 		return 0;
 	}
+
+#if defined(POSIX)
+	// Allow the AF_INET6 socket to also receive IPv4 traffic (v4-mapped).
+	{
+		int v6only = 0;
+		if ( setsockopt( newsocket, IPPROTO_IPV6, IPV6_V6ONLY, (char *)&v6only, sizeof(v6only) ) != 0 )
+		{
+			NET_GetLastError();
+			Msg ("WARNING: NET_OpenSocket: clearing IPV6_V6ONLY: %s (continuing v6-only)\n", NET_ErrorString(net_error) );
+		}
+	}
+#endif
 
 	
 	opt =  1; // make it non-blocking
@@ -626,6 +710,77 @@ int NET_OpenSocket ( const char *net_interface, int& port, int protocol )
 		}
 	}
 
+#if defined(POSIX)
+	// Dual-stack bind: bind to in6addr_any (or the v6 form of the requested
+	// interface). With IPV6_V6ONLY=0 this accepts both v6 and v4-mapped peers.
+	if (!net_interface || !net_interface[0] || !Q_strcmp(net_interface, "localhost"))
+	{
+		address.sin6_addr = in6addr_any;
+	}
+	else
+	{
+		// Resolve the requested interface; NET_StringToSockaddr now uses
+		// getaddrinfo and may yield a v6 or v4 address. A v4 result is
+		// promoted to v4-mapped so it fits sockaddr_in6.
+		struct sockaddr_storage ss;
+		if ( NET_StringToSockaddr( net_interface, (struct sockaddr *)&ss ) && ss.ss_family == AF_INET6 )
+		{
+			address = *(struct sockaddr_in6 *)&ss;
+		}
+		else if ( ss.ss_family == AF_INET )
+		{
+			Q_memset( &address, 0, sizeof(address) );
+			address.sin6_family = AF_INET6;
+			// v4-mapped form: ::ffff:a.b.c.d
+			address.sin6_addr.s6_addr[10] = 0xff;
+			address.sin6_addr.s6_addr[11] = 0xff;
+			Q_memcpy( &address.sin6_addr.s6_addr[12], &((struct sockaddr_in *)&ss)->sin_addr, 4 );
+		}
+		else
+		{
+			Q_memset( &address, 0, sizeof(address) );
+			address.sin6_addr = in6addr_any;
+		}
+	}
+
+	address.sin6_family = AF_INET6;
+
+	int port_offset;	// try binding socket to port, try next 10 is port is already used
+
+	for ( port_offset = 0; port_offset < PORT_TRY_MAX; port_offset++ )
+	{
+		if ( port == PORT_ANY )
+		{
+			address.sin6_port = 0;	// = INADDR_ANY
+		}
+		else
+		{
+			address.sin6_port = NET_HostToNetShort((short)( port + port_offset ));
+		}
+
+		VCR_NONPLAYBACKFN( bind (newsocket, (struct sockaddr *)&address, sizeof(address)), ret, "bind" );
+		if ( ret != -1 )
+		{
+			if ( port != PORT_ANY && port_offset != 0 )
+			{
+				port += port_offset;	// update port
+				ConDMsg( "Socket bound to non-default port %i because original port was already in use.\n", port );
+			}
+			break;
+		}
+
+		NET_GetLastError();
+
+		if ( port == PORT_ANY || net_error != WSAEADDRINUSE )
+		{
+			Msg ("WARNING: NNET_OpenSocket: bind: %s\n", NET_ErrorString(net_error));
+			NET_CloseSocket(newsocket,-1);
+			return 0;
+		}
+
+		// Try next port
+	}
+#else
 	if (!net_interface || !net_interface[0] || !Q_strcmp(net_interface, "localhost"))
 	{
 		address.sin_addr.s_addr = INADDR_ANY;
@@ -672,6 +827,7 @@ int NET_OpenSocket ( const char *net_interface, int& port, int protocol )
 
 		// Try next port
 	}
+#endif
 
 	const bool bStrictBind = CommandLine()->FindParm( "-strictportbind" );
 	if ( port_offset == PORT_TRY_MAX && !bStrictBind )
@@ -711,9 +867,9 @@ int NET_ConnectSocket( int sock, const netadr_t &addr )
 	if ( net_notcp )
 		return 0;
 
-	sockaddr saddr;
+	sockaddr_storage saddr;
 
-	addr.ToSockadr( &saddr );
+	addr.ToSockadr( (struct sockaddr *)&saddr );
 
 	int anyport = PORT_ANY;
 
@@ -726,7 +882,7 @@ int NET_ConnectSocket( int sock, const netadr_t &addr )
 	}
 
 	int ret;
-	VCR_NONPLAYBACKFN( connect( netsock->hTCP, &saddr, sizeof(saddr) ), ret, "connect" );
+	VCR_NONPLAYBACKFN( connect( netsock->hTCP, (struct sockaddr *)&saddr, sizeof(saddr) ), ret, "connect" );
 	if ( ret == -1 )
 	{
 		NET_GetLastError();
@@ -1407,7 +1563,7 @@ bool NET_ReceiveDatagram ( const int sock, netpacket_t * packet )
 	Assert ( packet );
 	Assert ( net_multiplayer );
 
-	struct sockaddr	from;
+	struct sockaddr_storage	from;
 	int				fromlen = sizeof(from);
 	int				net_socket = net_sockets[packet->source].hUDP;
 
@@ -1419,7 +1575,7 @@ bool NET_ReceiveDatagram ( const int sock, netpacket_t * packet )
 	if ( ret >= NET_MIN_MESSAGE )
 	{
 		packet->wiresize = ret;
-		packet->from.SetFromSockadr( &from );
+		packet->from.SetFromSockadr( (struct sockaddr *)&from );
 		packet->size = ret;
 
 		if ( net_showudp_wire.GetBool() )
@@ -1764,12 +1920,12 @@ void NET_ProcessListen(int sock)
 	if ( !netsock->bListening )
 		return;
 
-	sockaddr sa;
+	sockaddr_storage sa;
 	int nLengthAddr = sizeof(sa);
 		
 	int newSocket;
 
-	VCR_NONPLAYBACKFN( accept( netsock->hTCP, &sa, (socklen_t*)&nLengthAddr), newSocket, "accept" );
+	VCR_NONPLAYBACKFN( accept( netsock->hTCP, (sockaddr *)&sa, (socklen_t*)&nLengthAddr), newSocket, "accept" );
 #if !defined( NO_VCR )
 	VCRGenericValue( "sockaddr", &sa, sizeof( sa ) );
 #endif
@@ -1790,7 +1946,7 @@ void NET_ProcessListen(int sock)
 
 	psock.newsock = newSocket;
 	psock.netsock = sock;
-	psock.addr.SetFromSockadr( &sa );
+	psock.addr.SetFromSockadr( (struct sockaddr *)&sa );
 	psock.time = net_time;
 
 	AUTO_LOCK_FM( s_PendingSockets );
@@ -1976,18 +2132,29 @@ int NET_SendTo( bool verbose, SOCKET s, const char FAR * buf, int len, const str
 
 	VPROF_BUDGET( "NET_SendTo", VPROF_BUDGETGROUP_OTHER_NETWORKING );
 	
-	// If it's 0.0.0.0:0, then it's a fake player + sv_stressbots and we've plumbed everything all 
-	// the way through here, where we finally bail out.
-	sockaddr_in *pInternetAddr = (sockaddr_in*)to;
-#ifdef _WIN32
-	if ( pInternetAddr->sin_addr.S_un.S_addr == 0
-#else
-	if ( pInternetAddr->sin_addr.s_addr == 0 
-#endif
-		&& pInternetAddr->sin_port == 0 )
-	{		
-		return len;
+	// If it's an all-zero address (0.0.0.0:0 or [::]:0), then it's a fake player +
+	// sv_stressbots and we've plumbed everything all the way through here, where
+	// we finally bail out.
+	if ( to->sa_family == AF_INET )
+	{
+		const sockaddr_in *p4 = (const sockaddr_in*)to;
+		if ( p4->sin_addr.s_addr == 0 && p4->sin_port == 0 )
+			return len;
 	}
+#if defined(POSIX)
+	else if ( to->sa_family == AF_INET6 )
+	{
+		const sockaddr_in6 *p6 = (const sockaddr_in6*)to;
+		const uint8 *b = (const uint8 *)&p6->sin6_addr;
+		bool bAllZero = true;
+		for ( int i = 0; i < 16; i++ )
+		{
+			if ( b[i] != 0 ) { bAllZero = false; break; }
+		}
+		if ( bAllZero && p6->sin6_port == 0 )
+			return len;
+	}
+#endif
 
 	// Normally, we shouldn't need to write this data to the file, but it can help catch
 	// out-of-sync errors earlier.
@@ -2343,7 +2510,7 @@ int NET_SendPacket ( INetChannel *chan, int sock,  const netadr_t &to, const uns
 	ETWSendPacket( to.ToString() , length , 0 , 0 );
 
 	int		ret;
-	struct sockaddr	addr;
+	struct sockaddr_storage	addr;
 	int		net_socket;
 
 	if ( net_showudp.GetInt() && (*(unsigned int*)data == CONNECTIONLESS_HEADER) )
@@ -2352,7 +2519,18 @@ int NET_SendPacket ( INetChannel *chan, int sock,  const netadr_t &to, const uns
 		Msg("UDP -> %s: sz=%i OOB '%c'\n", to.ToString(), length, data[4] );
 	}
 
-	if ( (!NET_IsMultiplayer() && sock != NS_CLIENT) || to.type == NA_LOOPBACK || ( to.IsLocalhost() && !net_usesocketsforloopback.GetBool() ) )
+	// Redirect same-process loopback traffic to the in-process loopback queue
+	// instead of sending it over the wire. This is essential for listen servers,
+	// where the local client talks to the server in the same process.
+	//
+	// Only do this for IPv4 127.0.0.1 (NA_IP localhost). IPv6 ::1 (NA_IP6
+	// localhost) is left on the real UDP path so that a *separate process*
+	// (e.g. a second instance on the same machine connecting to [::1]) actually
+	// reaches the server's AF_INET6 socket. Sending ::1 to the in-process
+	// loopback queue would silently drop the packet (the other process never
+	// reads this queue), breaking same-host IPv6 multiplayer.
+	if ( (!NET_IsMultiplayer() && sock != NS_CLIENT) || to.type == NA_LOOPBACK ||
+		 ( to.type == NA_IP && to.IsLocalhost() && !net_usesocketsforloopback.GetBool() ) )
 	{
 		Assert( !pVoicePayload );
 
@@ -2368,6 +2546,14 @@ int NET_SendPacket ( INetChannel *chan, int sock,  const netadr_t &to, const uns
 	}
 	else if ( to.type == NA_IP )
 	{
+		net_socket = net_sockets[sock].hUDP;
+		if (!net_socket)
+			return length;
+	}
+	else if ( to.type == NA_IP6 )
+	{
+		// Dual-stack: the same AF_INET6 socket (IPV6_V6ONLY=0) can send to
+		// both IPv6 and IPv4-mapped peers, so reuse the UDP handle.
 		net_socket = net_sockets[sock].hUDP;
 		if (!net_socket)
 			return length;
@@ -2391,7 +2577,7 @@ int NET_SendPacket ( INetChannel *chan, int sock,  const netadr_t &to, const uns
 			return length;
 	}
 
-	to.ToSockadr ( &addr );
+	to.ToSockadr ( (struct sockaddr *)&addr );
 
 	MEM_ALLOC_CREDIT();
 	CUtlMemoryFixedGrowable< byte, NET_COMPRESSION_STACKBUF_SIZE > memCompressed( NET_COMPRESSION_STACKBUF_SIZE );
@@ -2484,12 +2670,12 @@ int NET_SendPacket ( INetChannel *chan, int sock,  const netadr_t &to, const uns
 		!(net_queued_packet_thread.GetInt() == NET_QUEUED_PACKET_THREAD_DEBUG_VALUE && chan ) )	
 	{
 		// simple case, small packet, just send it
-		ret = NET_SendTo( true, net_socket, (const char *)data, length, &addr, sizeof(addr), iGameDataLength );
+		ret = NET_SendTo( true, net_socket, (const char *)data, length, (const struct sockaddr *)&addr, sizeof(addr), iGameDataLength );
 	}
 	else
 	{
 		// split packet into smaller pieces
-		ret = NET_SendLong( chan, sock, net_socket, (const char *)data, length, &addr, sizeof(addr), nMaxRoutable );
+		ret = NET_SendLong( chan, sock, net_socket, (const char *)data, length, (const struct sockaddr *)&addr, sizeof(addr), nMaxRoutable );
 	}
 	
 	if (ret == -1)
@@ -2572,7 +2758,7 @@ void NET_FlushAllSockets( void )
 {
 	// drain any packets that my still lurk in our incoming queue
 	char data[2048];
-	struct sockaddr	from;
+	struct sockaddr_storage	from;
 	int	fromlen = sizeof(from);
 	
 	for (int i=0 ; i<net_sockets.Count() ; i++)
@@ -2790,12 +2976,22 @@ void NET_GetLocalAddress (void)
 
 		NET_StringToAdr (buff, &net_local_adr);
 
-		int ipaddr = ( net_local_adr.ip[0] << 24 ) + 
-					 ( net_local_adr.ip[1] << 16 ) + 
-					 ( net_local_adr.ip[2] << 8 ) + 
-					   net_local_adr.ip[3];
-
-		hostip.SetValue( ipaddr );
+		// hostip is a uint32 ConVar used widely across the engine and server
+		// browser; it can only hold an IPv4 address. Populate it when the
+		// resolved local address is IPv4 (or v4-mapped-v6), and leave it 0
+		// otherwise (IPv6-only hosts have no meaningful uint32 to advertise).
+		if ( net_local_adr.GetType() == NA_IP )
+		{
+			int ipaddr = ( net_local_adr.ip[0] << 24 ) + 
+						 ( net_local_adr.ip[1] << 16 ) + 
+						 ( net_local_adr.ip[2] << 8 ) + 
+						   net_local_adr.ip[3];
+			hostip.SetValue( ipaddr );
+		}
+		else
+		{
+			hostip.SetValue( 0 );
+		}
 	}
 }
 
@@ -3128,6 +3324,36 @@ void NET_ListenSocket( int sock, bool bListen )
 			return;
 		}
 
+#if defined(POSIX)
+		struct sockaddr_in6	address;
+		Q_memset( &address, 0, sizeof(address) );
+
+		if (!net_interface || !net_interface[0] || !Q_strcmp(net_interface, "localhost"))
+		{
+			address.sin6_addr = in6addr_any;
+		}
+		else
+		{
+			struct sockaddr_storage ss;
+			if ( NET_StringToSockaddr (net_interface, (struct sockaddr *)&ss) && ss.ss_family == AF_INET6 )
+			{
+				address = *(struct sockaddr_in6 *)&ss;
+			}
+			else if ( ss.ss_family == AF_INET )
+			{
+				address.sin6_family = AF_INET6;
+				address.sin6_addr.s6_addr[10] = 0xff;
+				address.sin6_addr.s6_addr[11] = 0xff;
+				Q_memcpy( &address.sin6_addr.s6_addr[12], &((struct sockaddr_in *)&ss)->sin_addr, 4 );
+			}
+		}
+
+		address.sin6_family = AF_INET6;
+		address.sin6_port = NET_HostToNetShort((short)( netsock->nPort ));
+
+		int ret;
+		VCR_NONPLAYBACKFN( bind( netsock->hTCP, (struct sockaddr *)&address, sizeof(address)), ret, "bind" );
+#else
 		struct sockaddr_in	address;
 
 		if (!net_interface || !net_interface[0] || !Q_strcmp(net_interface, "localhost"))
@@ -3144,6 +3370,7 @@ void NET_ListenSocket( int sock, bool bListen )
 
 		int ret;
 		VCR_NONPLAYBACKFN( bind( netsock->hTCP, (struct sockaddr *)&address, sizeof(address)), ret, "bind" );
+#endif
 		if ( ret == -1 )
 		{
 			NET_GetLastError();

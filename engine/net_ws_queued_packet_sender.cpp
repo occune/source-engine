@@ -234,13 +234,31 @@ int CQueuedPacketSender::Run()
 				// If it's a bot, don't do anything. Note: we DO want this code deep here because bots only
 				// try to send packets when sv_stressbots is set, in which case we want it to act as closely
 				// as a real player as possible.
-				sockaddr_in *pInternetAddr = (sockaddr_in*)pPacket->to.Base();
+				const sockaddr *pAddr = (const sockaddr*)pPacket->to.Base();
+				bool bNonZero = false;
+				if ( pAddr->sa_family == AF_INET )
+				{
+					const sockaddr_in *p4 = (const sockaddr_in*)pAddr;
 			#ifdef _WIN32
-				if ( pInternetAddr->sin_addr.S_un.S_addr != 0
+					bNonZero = ( p4->sin_addr.S_un.S_addr != 0 && p4->sin_port != 0 );
 			#else
-				if ( pInternetAddr->sin_addr.s_addr != 0 
+					bNonZero = ( p4->sin_addr.s_addr != 0 && p4->sin_port != 0 );
 			#endif
-					&& pInternetAddr->sin_port != 0 )
+				}
+#if defined(POSIX)
+				else if ( pAddr->sa_family == AF_INET6 )
+				{
+					const sockaddr_in6 *p6 = (const sockaddr_in6*)pAddr;
+					const uint8 *b = (const uint8*)&p6->sin6_addr;
+					for ( int i = 0; i < 16; i++ )
+					{
+						if ( b[i] != 0 ) { bNonZero = true; break; }
+					}
+					if ( p6->sin6_port == 0 )
+						bNonZero = false;
+				}
+#endif
+				if ( bNonZero )
 				{		
 					if ( bTrace )
 					{

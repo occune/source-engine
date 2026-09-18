@@ -303,8 +303,19 @@ static bool CheckOpenGLExtension_internal(const char *ext, const int coremajor, 
 			static CDynamicFunctionOpenGL< true, const char *( APIENTRY *)( Display*, int ), const char * > glXQueryExtensionsString("glXQueryExtensionsString");
 			if (glXQueryExtensionsString && glXGetCurrentDisplay) 
 			{
-				extensions = glXQueryExtensionsString(glXGetCurrentDisplay(), 0);
-				ptr = strstr(extensions, ext);
+				Display *dpy = glXGetCurrentDisplay();
+				// On Wayland/EGL-only systems there is no real GLX context,
+				// and glXGetCurrentDisplay() can return either NULL or a
+				// garbage non-NULL pointer (observed: 0xffffffffffffff38 on
+				// Mesa/Wayland). Calling glXQueryExtensionsString() with that
+				// crashes strstr() below. Sanity-check the pointer: on x86_64
+				// a valid heap pointer is always below 0x0000800000000000.
+				if (dpy && ((uintptr_t)dpy) < 0x0000800000000000ULL)
+				{
+					extensions = glXQueryExtensionsString(dpy, 0);
+					if (extensions && ((uintptr_t)extensions) < 0x0000800000000000ULL)
+						ptr = strstr(extensions, ext);
+				}
 			}
 		}
 #endif

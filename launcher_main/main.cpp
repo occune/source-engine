@@ -217,16 +217,24 @@ static void WaitForDebuggerConnect( int argc, char *argv[], int time )
 int main( int argc, char *argv[] )
 {
 	char ld_path[4196];
-	char *path = "bin/";
+	// On 64-bit Linux the SDK layout puts .so files in bin/linux64/.
+	// Prefer that subdirectory, with bin/ as a fallback for flat layouts.
+#if defined(__x86_64__) && defined(POSIX)
+	const char *binDir = "bin/linux64/";
+#else
+	const char *binDir = "bin/";
+#endif
 	char *ld_env;
 
 	if( (ld_env = getenv("LD_LIBRARY_PATH")) != NULL )
 	{
-		snprintf(ld_path, sizeof(ld_path), "%s:bin/", ld_env);
-		path = ld_path;
+		snprintf(ld_path, sizeof(ld_path), "%s:%s", ld_env, binDir);
+		setenv("LD_LIBRARY_PATH", ld_path, 1);
 	}
-
-	setenv("LD_LIBRARY_PATH", path, 1);
+	else
+	{
+		setenv("LD_LIBRARY_PATH", binDir, 1);
+	}
 
 	extern char** environ;
 	if( getenv("NO_EXECVE_AGAIN") == NULL )
@@ -235,10 +243,15 @@ int main( int argc, char *argv[] )
 		execve(argv[0], argv, environ);
 	}
 
-	void *launcher = dlopen( "bin/liblauncher" DLL_EXT_STRING, RTLD_NOW );
+	// On 64-bit Linux, Valve's SDK layout puts the launcher and engine .so
+	// files in bin/linux64/ rather than bin/. Try the platform subdirectory
+	// first, then fall back to bin/ for flat-layout installs. Don't print
+	// errors for intermediate attempts — only complain if all of them fail.
+	void *launcher = dlopen( "bin/linux64/liblauncher" DLL_EXT_STRING, RTLD_NOW );
 	if ( !launcher )
-		fprintf( stderr, "%s\nFailed to load the launcher\n", dlerror() );
-
+		launcher = dlopen( "bin/linux64/launcher" DLL_EXT_STRING, RTLD_NOW );
+	if ( !launcher )
+		launcher = dlopen( "bin/liblauncher" DLL_EXT_STRING, RTLD_NOW );
 	if( !launcher )
 		launcher = dlopen( "bin/launcher" DLL_EXT_STRING, RTLD_NOW );
 
