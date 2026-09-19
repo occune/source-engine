@@ -175,6 +175,13 @@ void CLinuxFont::CreateFontList()
 			{ "Bitstream Vera Sans", "Lucidia Console" },
 			{ "DejaVu Sans",         "Lucidia Console" },
 			{ "Liberation Mono",     "Lucidia Console" },
+			// Mono substitutions for Courier New (used by the console and
+			// other monospaced VGUI elements). Without these the console
+			// font fails to load silently on Linux and no text is drawn.
+			{ "Liberation Mono",     "Courier New" },
+			{ "DejaVu Sans Mono",    "Courier New" },
+			{ "Noto Sans Mono",      "Courier New" },
+			{ "Bitstream Vera Sans Mono", "Courier New" },
 		};
 		for ( int iAlias = 0; iAlias < ARRAYSIZE(alias); ++iAlias )
 		{
